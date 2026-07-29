@@ -110,6 +110,10 @@ st.sidebar.caption("Executive Suite | Premium Brands")
 archivo_subido = None
 df_ventas, df_stock_emp, df_stock_cli = obtener_datos(archivo_subido)
 
+# Garantizar columnas por defecto si no están presentes
+if 'Canal' not in df_ventas.columns:
+    df_ventas['Canal'] = 'General'
+
 df_ventas['Año'] = df_ventas['Fecha'].dt.year
 df_ventas['Mes_Num'] = df_ventas['Fecha'].dt.month
 df_ventas['Mes_Nombre'] = df_ventas['Fecha'].dt.strftime('%b')
@@ -127,19 +131,18 @@ st.sidebar.subheader("🎛️ Filtros Globales")
 lista_canales = ["Todos"] + sorted(list(df_ventas['Canal'].dropna().unique()))
 canal_sel = st.sidebar.selectbox("Canal de Venta", lista_canales)
 
-lista_marcas = ["Todas"] + sorted(list(df_ventas['Marca'].unique()))
+lista_marcas = ["Todas"] + sorted(list(df_ventas['Marca'].unique())) if 'Marca' in df_ventas.columns else ["Todas"]
 marca_sel = st.sidebar.selectbox("Marca", lista_marcas)
 
 df_f = df_ventas.copy()
 if canal_sel != "Todos":
     df_f = df_f[df_f['Canal'] == canal_sel]
-if marca_sel != "Todas":
+if marca_sel != "Todas" and 'Marca' in df_f.columns:
     df_f = df_f[df_f['Marca'] == marca_sel]
 
 # --- PALETA DE COLORES CORPORATIVA ---
 COLOR_PRIMARY = "#C59D7F"   # Bronce / Dorado Premium
 COLOR_SECONDARY = "#2D3748" # Gris Pizarra
-COLOR_ACCENT = "#4A5568"
 
 # ==========================================
 # MÓDULO 1: DASHBOARD BI
@@ -153,10 +156,10 @@ if modulo == "📊 Dashboard BI":
     </div>
     """, unsafe_allow_html=True)
 
-    venta_usd = df_f['Monto_USD'].sum()
+    venta_usd = df_f['Monto_USD'].sum() if 'Monto_USD' in df_f.columns else 0
     venta_pen = venta_usd * TC_GLOBAL
-    unidades_totales = df_f['Cantidad'].sum()
-    ticket_promedio = df_f['Monto_USD'].mean() if len(df_f) > 0 else 0
+    unidades_totales = df_f['Cantidad'].sum() if 'Cantidad' in df_f.columns else 0
+    ticket_promedio = df_f['Monto_USD'].mean() if ('Monto_USD' in df_f.columns and len(df_f) > 0) else 0
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -204,19 +207,22 @@ if modulo == "📊 Dashboard BI":
 
     with col_g2:
         st.markdown("### 📊 Top Categorías ($ USD)")
-        df_cat = df_f.groupby('Categoria')['Monto_USD'].sum().reset_index().sort_values('Monto_USD', ascending=True)
-        fig_cat = px.bar(df_cat, x='Monto_USD', y='Categoria', orientation='h', color_discrete_sequence=[COLOR_SECONDARY])
-        fig_cat.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis=dict(showgrid=True, gridcolor='#EDF2F7'))
-        st.plotly_chart(fig_cat, use_container_width=True)
+        col_cat = 'Categoria' if 'Categoria' in df_f.columns else ('Categoría' if 'Categoría' in df_f.columns else None)
+        if col_cat:
+            df_cat = df_f.groupby(col_cat)['Monto_USD'].sum().reset_index().sort_values('Monto_USD', ascending=True)
+            fig_cat = px.bar(df_cat, x='Monto_USD', y=col_cat, orientation='h', color_discrete_sequence=[COLOR_SECONDARY])
+            fig_cat.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', xaxis=dict(showgrid=True, gridcolor='#EDF2F7'))
+            st.plotly_chart(fig_cat, use_container_width=True)
 
     st.markdown("---")
 
     col_l, col_r = st.columns([3, 2])
     with col_l:
         st.markdown("### 🏆 Top 10 Clientes Clave")
-        df_top = df_f.groupby(['Cliente', 'Canal'])['Monto_USD'].sum().reset_index().sort_values('Monto_USD', ascending=False).head(10)
-        df_top['Monto_USD'] = df_top['Monto_USD'].apply(lambda x: f"${x:,.2f}")
-        st.dataframe(df_top, use_container_width=True, hide_index=True)
+        if 'Cliente' in df_f.columns:
+            df_top = df_f.groupby(['Cliente', 'Canal'])['Monto_USD'].sum().reset_index().sort_values('Monto_USD', ascending=False).head(10)
+            df_top['Monto_USD'] = df_top['Monto_USD'].apply(lambda x: f"${x:,.2f}")
+            st.dataframe(df_top, use_container_width=True, hide_index=True)
 
     with col_r:
         st.markdown("### 🏢 Distribución por Canal")
@@ -263,10 +269,11 @@ elif modulo == "🤖 NEXUS Copilot":
     
     if pregunta:
         preg_clean = pregunta.lower()
-        if "champagne" in preg_clean:
-            res = df_f[df_f['Categoria'] == 'CHAMPAGNE']['Monto_USD'].sum()
+        col_cat = 'Categoria' if 'Categoria' in df_f.columns else ('Categoría' if 'Categoría' in df_f.columns else None)
+        if "champagne" in preg_clean and col_cat:
+            res = df_f[df_f[col_cat] == 'CHAMPAGNE']['Monto_USD'].sum()
             st.success(f"🍾 La venta acumulada en **Champagne** es de **${res:,.2f} USD**.")
-        elif "top cliente" in preg_clean or "mejores clientes" in preg_clean:
+        elif ("top cliente" in preg_clean or "mejores clientes" in preg_clean) and 'Cliente' in df_f.columns:
             res_cli = df_f.groupby('Cliente')['Monto_USD'].sum().reset_index().sort_values('Monto_USD', ascending=False).head(5)
             st.write("🏆 **Top 5 Clientes Principales:**")
             st.table(res_cli)
