@@ -92,7 +92,7 @@ st.markdown("""
 
 TC_GLOBAL = 3.50
 
-# --- CARGA DE DATOS ---
+# --- CARGA Y NORMALIZACIÓN DE DATOS ---
 @st.cache_data
 def obtener_datos(file):
     if file is not None:
@@ -100,23 +100,40 @@ def obtener_datos(file):
         df['Fecha'] = pd.to_datetime(df['Fecha'])
         return df, None, None
     else:
-        return generar_datos_prueba()
+        res = generar_datos_prueba()
+        if isinstance(res, tuple):
+            return res[0], res[1] if len(res) > 1 else None, res[2] if len(res) > 2 else None
+        return res, None, None
+
+archivo_subido = None
+df_ventas, df_stock_emp, df_stock_cli = obtener_datos(archivo_subido)
+
+# Normalizador defensivo de columnas
+if 'Monto_USD' not in df_ventas.columns:
+    if 'Monto' in df_ventas.columns:
+        df_ventas['Monto_USD'] = df_ventas['Monto']
+    elif 'Venta_USD' in df_ventas.columns:
+        df_ventas['Monto_USD'] = df_ventas['Venta_USD']
+    else:
+        df_ventas['Monto_USD'] = 100.0
+
+if 'Cantidad' not in df_ventas.columns:
+    df_ventas['Cantidad'] = 10
+
+if 'Canal' not in df_ventas.columns:
+    df_ventas['Canal'] = 'General'
+
+if 'Marca' not in df_ventas.columns:
+    df_ventas['Marca'] = 'CHANDON'
+
+df_ventas['Año'] = df_ventas['Fecha'].dt.year
+df_ventas['Mes_Num'] = df_ventas['Fecha'].dt.month
+df_ventas['Mes_Nombre'] = df_ventas['Fecha'].dt.strftime('%b')
 
 # --- BARRA LATERAL (SIDEBAR) ---
 st.sidebar.image("https://cdn-icons-png.flaticon.com/512/3135/3135715.png", width=45)
 st.sidebar.title("NEXUS PRO v2.0")
 st.sidebar.caption("Executive Suite | Premium Brands")
-
-archivo_subido = None
-df_ventas, df_stock_emp, df_stock_cli = obtener_datos(archivo_subido)
-
-# Garantizar columnas por defecto si no están presentes
-if 'Canal' not in df_ventas.columns:
-    df_ventas['Canal'] = 'General'
-
-df_ventas['Año'] = df_ventas['Fecha'].dt.year
-df_ventas['Mes_Num'] = df_ventas['Fecha'].dt.month
-df_ventas['Mes_Nombre'] = df_ventas['Fecha'].dt.strftime('%b')
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📌 Módulos de Navegación")
@@ -131,13 +148,13 @@ st.sidebar.subheader("🎛️ Filtros Globales")
 lista_canales = ["Todos"] + sorted(list(df_ventas['Canal'].dropna().unique()))
 canal_sel = st.sidebar.selectbox("Canal de Venta", lista_canales)
 
-lista_marcas = ["Todas"] + sorted(list(df_ventas['Marca'].unique())) if 'Marca' in df_ventas.columns else ["Todas"]
+lista_marcas = ["Todas"] + sorted(list(df_ventas['Marca'].dropna().unique()))
 marca_sel = st.sidebar.selectbox("Marca", lista_marcas)
 
 df_f = df_ventas.copy()
 if canal_sel != "Todos":
     df_f = df_f[df_f['Canal'] == canal_sel]
-if marca_sel != "Todas" and 'Marca' in df_f.columns:
+if marca_sel != "Todas":
     df_f = df_f[df_f['Marca'] == marca_sel]
 
 # --- PALETA DE COLORES CORPORATIVA ---
@@ -156,10 +173,10 @@ if modulo == "📊 Dashboard BI":
     </div>
     """, unsafe_allow_html=True)
 
-    venta_usd = df_f['Monto_USD'].sum() if 'Monto_USD' in df_f.columns else 0
+    venta_usd = df_f['Monto_USD'].sum()
     venta_pen = venta_usd * TC_GLOBAL
-    unidades_totales = df_f['Cantidad'].sum() if 'Cantidad' in df_f.columns else 0
-    ticket_promedio = df_f['Monto_USD'].mean() if ('Monto_USD' in df_f.columns and len(df_f) > 0) else 0
+    unidades_totales = df_f['Cantidad'].sum()
+    ticket_promedio = df_f['Monto_USD'].mean() if len(df_f) > 0 else 0
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
