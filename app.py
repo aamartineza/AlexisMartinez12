@@ -19,104 +19,107 @@ st.set_page_config(
 
 TC_GLOBAL = 3.50
 
-# --- CARGA Y PREPARACIÓN DE DATOS (PARQUET CON CACHÉ) ---
+# --- CARGA Y PREPARACIÓN ROBUSTA DE DATOS (PARQUET CON CACHÉ) ---
 @st.cache_data(ttl=3600)
 def obtener_datos(file=None):
+    df = None
     if file is not None:
-        # Carga manual por el usuario desde el sidebar
         if file.name.endswith('.parquet'):
             df = pd.read_parquet(file)
         elif file.name.endswith('.csv'):
             df = pd.read_csv(file)
         else:
             df = pd.read_excel(file)
-        
-        # Mapeo dinámico de columnas mínimas
-        cols_fec = [c for c in df.columns if 'fecha' in c.lower() or 'fec' in c.lower()]
-        cols_mon = [c for c in df.columns if 'monto' in c.lower() or 'venta' in c.lower() or 'total' in c.lower()]
-        
-        col_fecha = cols_fec[0] if cols_fec else df.columns[0]
-        col_monto = cols_mon[0] if cols_mon else df.columns[1]
-        
-        df['Fecha'] = pd.to_datetime(df[col_fecha], errors='coerce')
-        df['Monto_Venta'] = pd.to_numeric(df[col_monto], errors='coerce').fillna(0)
-        return df, None, None
+    else:
+        PARQUET_HISTORICO = 'ventas_historico_2020_2026.parquet'
+        if os.path.exists(PARQUET_HISTORICO):
+            df = pd.read_parquet(PARQUET_HISTORICO)
 
-    # Intentar leer el archivo histórico Parquet en la carpeta del proyecto
-    PARQUET_HISTORICO = 'ventas_historico_2020_2026.parquet'
-    if os.path.exists(PARQUET_HISTORICO):
-        df = pd.read_parquet(PARQUET_HISTORICO)
-        df.columns = df.columns.str.strip()
-        
-        # Detección inteligente de nombres de columnas
-        cols_fec = [c for c in df.columns if 'fecha' in c.lower() or 'fec' in c.lower()]
-        cols_mon = [c for c in df.columns if 'monto' in c.lower() or 'venta' in c.lower() or 'total' in c.lower() or 'vta' in c.lower()]
-        cols_cli = [c for c in df.columns if 'cliente' in c.lower() or 'razon' in c.lower() or 'nom' in c.lower()]
-        cols_mar = [c for c in df.columns if 'marca' in c.lower()]
-        cols_cat = [c for c in df.columns if 'cat' in c.lower() or 'fam' in c.lower()]
-        cols_can = [c for c in df.columns if 'canal' in c.lower() or 'tipo' in c.lower()]
+    if df is None or df.empty:
+        df_gen = generar_datos_prueba()
+        if isinstance(df_gen, tuple):
+            return df_gen[0], None, None
+        return df_gen, None, None
 
-        # Estandarización de columnas
-        df['Fecha'] = pd.to_datetime(df[cols_fec[0]], errors='coerce') if cols_fec else pd.to_datetime('2026-01-01')
-        df['Monto_Venta'] = pd.to_numeric(df[cols_mon[0]], errors='coerce').fillna(0) if cols_mon else 0.0
-        df['Nombre_Cliente'] = df[cols_cli[0]].astype(str) if cols_cli else 'Desconocido'
-        df['Marca'] = df[cols_mar[0]].astype(str) if cols_mar else 'General'
-        df['Categoria'] = df[cols_cat[0]].astype(str) if cols_cat else 'General'
-        df['Tipo_Cliente'] = df[cols_can[0]].astype(str) if cols_can else 'Offtrade'
-        df['Cantidad'] = pd.to_numeric(df['Cantidad'], errors='coerce').fillna(1) if 'Cantidad' in df.columns else 1
+    # Normalizar nombres de columnas a mayúsculas
+    df.columns = [str(c).strip().upper() for c in df.columns]
 
-        # Carga opcional de archivos de stock Parquet
-        df_stock_emp = pd.read_parquet('stockxlotes28.07.parquet') if os.path.exists('stockxlotes28.07.parquet') else None
-        df_stock_cli = None
-        
-        return df, df_stock_emp, df_stock_cli
+    # 1. DETECCIÓN DE FECHA
+    cols_fec = [c for c in df.columns if any(x in c for x in ['FECHA', 'FEC', 'DATE'])]
+    col_fecha = cols_fec[0] if cols_fec else df.columns[0]
+    df['Fecha'] = pd.to_datetime(df[col_fecha], errors='coerce')
 
-    # Fallback a generador de pruebas en caso no exista el Parquet
-    return generar_datos_prueba()
+    # 2. DETECCIÓN DE MONTO / VENTA
+    cols_mon = [c for c in df.columns if any(x in c for x in ['USD', 'MONTO', 'VENTA', 'TOTAL', 'IMPORTE', 'NETO', 'VTA', 'SOLES', 'S/'])]
+    col_monto = cols_mon[0] if cols_mon else df.columns[1]
 
-# Carga de la Data
+    # Limpiar caracteres extraños en monto
+    val_monto = df[col_monto].astype(str).str.replace(r'[^\d.-]', '', regex=True)
+    df['Monto_Venta'] = pd.to_numeric(val_monto, errors='coerce').fillna(0)
+
+    if 'USD' in col_monto:
+        df['Venta_USD'] = df['Monto_Venta']
+    else:
+        df['Venta_USD'] = df['Monto_Venta'] / TC_GLOBAL
+
+    # 3. DETECCIÓN DE TEXTOS (Cliente, Marca, Categoria, Canal)
+    cols_cli = [c for c in df.columns if any(x in c for x in ['CLIENTE', 'RAZON', 'NOM', 'RUC'])]
+    cols_mar = [c for c in df.columns if 'MARCA' in c]
+    cols_cat = [c for c in df.columns if any(x in c for x in ['CAT', 'FAM', 'LINEA', 'GRUPO'])]
+    cols_can = [c for c in df.columns if any(x in c for x in ['CANAL', 'TIPO', 'SUB'])]
+
+    df['Nombre_Cliente'] = df[cols_cli[0]].astype(str) if cols_cli else 'Cliente General'
+    df['Marca'] = df[cols_mar[0]].astype(str) if cols_mar else 'Marca General'
+    df['Categoria'] = df[cols_cat[0]].astype(str) if cols_cat else 'General'
+    df['Tipo_Cliente'] = df[cols_can[0]].astype(str) if cols_can else 'Offtrade'
+
+    cols_cant = [c for c in df.columns if any(x in c for x in ['CANT', 'UNI', 'QTY'])]
+    df['Cantidad'] = pd.to_numeric(df[cols_cant[0]], errors='coerce').fillna(1) if cols_cant else 1
+
+    # Tratar fechas nulas de forma segura
+    if df['Fecha'].isna().all():
+        df['Fecha'] = pd.date_range(start='2020-01-01', periods=len(df), freq='D')
+    else:
+        df['Fecha'] = df['Fecha'].fillna(method='ffill').fillna(pd.Timestamp('2026-01-01'))
+
+    # Detección de Stocks Parquet
+    df_stock_emp = pd.read_parquet('stockxlotes28.07.parquet') if os.path.exists('stockxlotes28.07.parquet') else None
+
+    return df, df_stock_emp, None
+
+# --- CARGAR DATOS Y CREAR TIEMPOS ---
 df_ventas, df_stock_emp, df_stock_cli = obtener_datos(None)
 
-# Creación de Columnas de Tiempo y Moneda
-df_ventas['Año'] = df_ventas['Fecha'].dt.year
-df_ventas['Mes_Num'] = df_ventas['Fecha'].dt.month
-df_ventas['Día_Num'] = df_ventas['Fecha'].dt.day
+df_ventas['Año'] = df_ventas['Fecha'].dt.year.fillna(2026).astype(int)
+df_ventas['Mes_Num'] = df_ventas['Fecha'].dt.month.fillna(1).astype(int)
+df_ventas['Día_Num'] = df_ventas['Fecha'].dt.day.fillna(1).astype(int)
 df_ventas['Mes_Nombre'] = df_ventas['Fecha'].dt.strftime('%b').str.lower()
-df_ventas['Venta_USD'] = df_ventas['Monto_Venta'] / TC_GLOBAL
 
-# --- CÁLCULO DE MÉTRICAS HEADER (BLINDADO CONTRA ERRORES/NULOS) ---
+# --- CÁLCULO DE MÉTRICAS HEADER ---
 def calcular_metricas_header(df):
-    fechas_validas = df['Fecha'].dropna()
-    if df.empty or fechas_validas.empty:
-        fecha_max = pd.Timestamp.now()
-        ytd_actual_usd, var_ytd_pct, venta_hoy_usd = 0.0, 0.0, 0.0
-    else:
-        fecha_max = fechas_validas.max()
-        if pd.isna(fecha_max):
-            fecha_max = pd.Timestamp.now()
+    fechas_v = df['Fecha'].dropna()
+    if df.empty or fechas_v.empty:
+        return 0.0, 0.0, 0.0, "29/07/2026", "23:59:59"
+    
+    fecha_max = fechas_v.max()
+    año_act = fecha_max.year
+    dia_ano = fecha_max.dayofyear
 
-        año_actual = fecha_max.year
-        dia_del_año = fecha_max.dayofyear
-        
-        df_hoy = df[df['Fecha'].dt.date == fecha_max.date()]
-        venta_hoy_usd = df_hoy['Venta_USD'].sum() if 'Venta_USD' in df_hoy.columns else 0.0
-        
-        df_ytd_act = df[(df['Año'] == año_actual) & (df['Fecha'].dt.dayofyear <= dia_del_año)]
-        ytd_actual_usd = df_ytd_act['Venta_USD'].sum() if 'Venta_USD' in df_ytd_act.columns else 0.0
-        
-        df_ytd_ant = df[(df['Año'] == año_actual - 1) & (df['Fecha'].dt.dayofyear <= dia_del_año)]
-        ytd_anterior_usd = df_ytd_ant['Venta_USD'].sum() if 'Venta_USD' in df_ytd_ant.columns else 0.0
-        
-        var_ytd_pct = ((ytd_actual_usd - ytd_anterior_usd) / ytd_anterior_usd) * 100 if ytd_anterior_usd > 0 else 0.0
+    df_hoy = df[df['Fecha'].dt.date == fecha_max.date()]
+    venta_hoy_usd = df_hoy['Venta_USD'].sum() if not df_hoy.empty else 0.0
+
+    df_ytd_act = df[(df['Año'] == año_act) & (df['Fecha'].dt.dayofyear <= dia_ano)]
+    ytd_act_usd = df_ytd_act['Venta_USD'].sum()
+
+    df_ytd_ant = df[(df['Año'] == año_act - 1) & (df['Fecha'].dt.dayofyear <= dia_ano)]
+    ytd_ant_usd = df_ytd_ant['Venta_USD'].sum()
+
+    var_pct = ((ytd_act_usd - ytd_ant_usd) / ytd_ant_usd) * 100 if ytd_ant_usd > 0 else 0.0
     
-    try:
-        str_fecha = fecha_max.strftime('%d/%m/%Y')
-        str_hora = fecha_max.strftime('%H:%M:%S') if fecha_max.time() != pd.Timestamp('00:00:00').time() else "23:59:59"
-    except Exception:
-        str_fecha = "29/07/2026"
-        str_hora = "23:59:59"
-    
-    return ytd_actual_usd, var_ytd_pct, venta_hoy_usd, str_fecha, str_hora
+    str_fecha = fecha_max.strftime('%d/%m/%Y')
+    str_hora = fecha_max.strftime('%H:%M:%S') if fecha_max.time() != pd.Timestamp('00:00:00').time() else "23:59:59"
+
+    return ytd_act_usd, var_pct, venta_hoy_usd, str_fecha, str_hora
 
 ytd_usd, var_pct, hoy_usd, fecha_cierre, hora_cierre = calcular_metricas_header(df_ventas)
 color_var = '#38A169' if var_pct >= 0 else '#E53E3E'
@@ -125,129 +128,29 @@ symbol_var = '▲' if var_pct >= 0 else '▼'
 # --- ENCABEZADO Y ESTILOS CSS ---
 st.html(f"""
 <style>
-.stAppDeployButton, #MainMenu, [data-testid="stAppDeployButton"] {{
-    display: none !important;
+.stAppDeployButton, #MainMenu, [data-testid="stAppDeployButton"] {{ display: none !important; }}
+header[data-testid="stHeader"] {{ background: transparent !important; z-index: 1000001 !important; }}
+[data-testid="stSidebarCollapseButton"], button[data-testid="baseButton-header"], [data-testid="collapsedControl"] {{
+    z-index: 1000005 !important; position: fixed !important; top: 12px !important; left: 15px !important; display: flex !important;
 }}
-header[data-testid="stHeader"] {{
-    background: transparent !important;
-    z-index: 1000001 !important;
-}}
-[data-testid="stSidebarCollapseButton"], 
-button[data-testid="baseButton-header"],
-[data-testid="collapsedControl"] {{
-    z-index: 1000005 !important;
-    position: fixed !important;
-    top: 12px !important;
-    left: 15px !important;
-    display: flex !important;
-    visibility: visible !important;
-}}
-.main .block-container {{
-    padding-top: 105px !important;
-    background-color: #FFFFFF;
-}}
-html, body, [data-testid="stAppViewContainer"] {{
-    background-color: #FFFFFF;
-    font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
-}}
+.main .block-container {{ padding-top: 105px !important; background-color: #FFFFFF; }}
+html, body, [data-testid="stAppViewContainer"] {{ background-color: #FFFFFF; font-family: 'Segoe UI', Roboto, sans-serif; }}
 .sticky-header {{
-    position: fixed;
-    top: 0;
-    right: 0;
-    left: 0;
-    height: 85px;
-    background-color: #FFFFFF;
-    z-index: 99999;
-    padding: 8px 30px 8px 80px;
-    border-bottom: 1.5px solid #C59D7F;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    box-shadow: 0 2px 10px rgba(0,0,0,0.04);
+    position: fixed; top: 0; right: 0; left: 0; height: 85px; background-color: #FFFFFF; z-index: 99999;
+    padding: 8px 30px 8px 80px; border-bottom: 1.5px solid #C59D7F; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 2px 10px rgba(0,0,0,0.04);
 }}
-.brand-group {{
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    text-align: center;
-}}
-.star-logo {{
-    color: #C59D7F;
-    font-size: 24px;
-    line-height: 1;
-    margin-bottom: 0px;
-}}
-.brand-title {{
-    font-size: 22px;
-    font-weight: 300;
-    color: #4A5568;
-    margin: 0;
-    line-height: 1;
-    letter-spacing: 0.5px;
-    white-space: nowrap;
-}}
-.subtitle-offtrade {{
-    font-size: 12px;
-    color: #C59D7F;
-    font-weight: 600;
-    margin-top: 2px;
-    letter-spacing: 0.5px;
-    white-space: nowrap;
-}}
-.main-title-header {{
-    font-size: 19px;
-    color: #4A5568;
-    font-weight: 300;
-    margin-left: 20px;
-    border-left: 1px solid #E2E8F0;
-    padding-left: 20px;
-    line-height: 1.2;
-    white-space: nowrap;
-}}
-.metrics-group {{
-    display: flex;
-    align-items: center;
-    gap: 25px;
-}}
-.metric-card-header {{
-    display: flex;
-    flex-direction: column;
-    text-align: right;
-}}
-.label-header {{
-    font-size: 10px;
-    color: #A0AEC0;
-    text-transform: uppercase;
-    font-weight: 600;
-    letter-spacing: 0.8px;
-    white-space: nowrap;
-}}
-.val-header {{
-    font-size: 18px;
-    font-weight: 700;
-    color: #2D3748;
-    line-height: 1.1;
-    white-space: nowrap;
-}}
-.badge-header {{
-    font-size: 11px;
-    font-weight: 700;
-    white-space: nowrap;
-}}
-.divider-header {{
-    border-left: 1px solid #E2E8F0;
-    height: 40px;
-}}
-.tag-header {{
-    font-size: 11px;
-    color: #C59D7F;
-    font-weight: 700;
-    text-align: right;
-    text-transform: uppercase;
-    letter-spacing: 1.2px;
-    line-height: 1.2;
-    white-space: nowrap;
-}}
+.brand-group {{ display: flex; flex-direction: column; align-items: center; text-align: center; }}
+.star-logo {{ color: #C59D7F; font-size: 24px; line-height: 1; }}
+.brand-title {{ font-size: 22px; font-weight: 300; color: #4A5568; letter-spacing: 0.5px; }}
+.subtitle-offtrade {{ font-size: 12px; color: #C59D7F; font-weight: 600; }}
+.main-title-header {{ font-size: 19px; color: #4A5568; font-weight: 300; margin-left: 20px; border-left: 1px solid #E2E8F0; padding-left: 20px; }}
+.metrics-group {{ display: flex; align-items: center; gap: 25px; }}
+.metric-card-header {{ display: flex; flex-direction: column; text-align: right; }}
+.label-header {{ font-size: 10px; color: #A0AEC0; text-transform: uppercase; font-weight: 600; }}
+.val-header {{ font-size: 18px; font-weight: 700; color: #2D3748; }}
+.badge-header {{ font-size: 11px; font-weight: 700; }}
+.divider-header {{ border-left: 1px solid #E2E8F0; height: 40px; }}
+.tag-header {{ font-size: 11px; color: #C59D7F; font-weight: 700; text-align: right; text-transform: uppercase; }}
 </style>
 
 <div class="sticky-header">
@@ -262,23 +165,17 @@ html, body, [data-testid="stAppViewContainer"] {{
             <span style="font-size: 13px; color: #C59D7F; font-weight: 500;">Bienvenido Alexis</span>
         </div>
     </div>
-    
     <div class="metrics-group">
         <div class="metric-card-header">
             <span class="label-header">Venta YTD 2026 ($ USD)</span>
             <span class="val-header">$ {ytd_usd:,.0f}</span>
-            <span class="badge-header" style="color: {color_var};">
-                {symbol_var} {abs(var_pct):.1f}% vs 2025 YTD
-            </span>
+            <span class="badge-header" style="color: {color_var};">{symbol_var} {abs(var_pct):.1f}% vs 2025 YTD</span>
         </div>
         <div class="divider-header"></div>
         <div class="metric-card-header">
             <span class="label-header">Venta Hoy Facturada ($ USD)</span>
             <span class="val-header">$ {hoy_usd:,.2f}</span>
-            <span class="label-header" style="color: #C59D7F; font-size: 10px; margin-top: 1px;">
-                Cierre: {fecha_cierre}<br>
-                <span style="color: #718096; font-weight: 700;">{hora_cierre}</span>
-            </span>
+            <span class="label-header" style="color: #C59D7F; font-size: 10px;">Cierre: {fecha_cierre}<br><span style="color: #718096; font-weight: 700;">{hora_cierre}</span></span>
         </div>
         <div class="divider-header"></div>
         <div class="tag-header">DASHBOARD<br>COMERCIAL</div>
@@ -286,17 +183,17 @@ html, body, [data-testid="stAppViewContainer"] {{
 </div>
 """)
 
-# --- BARRA LATERAL (SIDEBAR) ---
+# --- BARRA LATERAL (FILTROS) ---
 st.sidebar.markdown("<br>", unsafe_allow_html=True)
 st.sidebar.title("Filtros Globales")
 
 archivo_subido = st.sidebar.file_uploader("Actualizar base de ventas:", type=["parquet", "xlsx", "csv"])
 if archivo_subido is not None:
     df_ventas, _, _ = obtener_datos(archivo_subido)
-    df_ventas['Año'] = df_ventas['Fecha'].dt.year
-    df_ventas['Mes_Num'] = df_ventas['Fecha'].dt.month
+    df_ventas['Año'] = df_ventas['Fecha'].dt.year.fillna(2026).astype(int)
+    df_ventas['Mes_Num'] = df_ventas['Fecha'].dt.month.fillna(1).astype(int)
+    df_ventas['Día_Num'] = df_ventas['Fecha'].dt.day.fillna(1).astype(int)
     df_ventas['Mes_Nombre'] = df_ventas['Fecha'].dt.strftime('%b').str.lower()
-    df_ventas['Venta_USD'] = df_ventas['Monto_Venta'] / TC_GLOBAL
 
 años_disp = sorted(df_ventas['Año'].dropna().unique())
 años_sel = st.sidebar.multiselect("Filtrar por Año:", años_disp, default=años_disp)
@@ -304,7 +201,10 @@ años_sel = st.sidebar.multiselect("Filtrar por Año:", años_disp, default=año
 canales_disp = sorted(df_ventas['Tipo_Cliente'].dropna().unique())
 canales_sel = st.sidebar.multiselect("Filtrar por Canal:", canales_disp, default=canales_disp)
 
-df_f = df_ventas[(df_ventas['Año'].isin(años_sel)) & (df_ventas['Tipo_Cliente'].isin(canales_sel))]
+filtro_año = años_sel if años_sel else años_disp
+filtro_canal = canales_sel if canales_sel else canales_disp
+
+df_f = df_ventas[(df_ventas['Año'].isin(filtro_año)) & (df_ventas['Tipo_Cliente'].isin(filtro_canal))]
 
 st.sidebar.markdown("---")
 modulo = st.sidebar.radio(
@@ -317,9 +217,13 @@ modulo = st.sidebar.radio(
 # -----------------------------------------------------------------------------
 if modulo == "📊 Dashboard BI":
     m1, m2, m3 = st.columns(3)
-    m1.metric("Venta Total ($ USD)", f"$ {df_f['Venta_USD'].sum():,.2f}")
-    m2.metric("Unidades Vendidas", f"{df_f['Cantidad'].sum():,.0f}")
-    m3.metric("Ticket Promedio", f"$ {df_f['Venta_USD'].mean():,.2f}")
+    total_usd = df_f['Venta_USD'].sum()
+    cant_unidades = df_f['Cantidad'].sum()
+    ticket_prom = df_f['Venta_USD'].mean() if len(df_f) > 0 else 0.0
+
+    m1.metric("Venta Total ($ USD)", f"$ {total_usd:,.2f}")
+    m2.metric("Unidades Vendidas", f"{cant_unidades:,.0f}")
+    m3.metric("Ticket Promedio", f"$ {ticket_prom:,.2f}")
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -422,7 +326,7 @@ elif modulo == "🤖 NEXUS Copilot":
                 filtros.append(f"Marca: **{mar}**")
                 break
 
-        # 3. FILTRO DE AÑO (Soporta 2020 a 2026)
+        # 3. FILTRO DE AÑO (2020 a 2026)
         años_enc = re.findall(r'\b(202[0-6])\b', q)
         if años_enc:
             ano_sel = int(años_enc[0])
@@ -467,11 +371,12 @@ elif modulo == "🤖 NEXUS Copilot":
             filtros.append(f"Día Exacto: **{num_dia}**")
 
         # 6. ORDENAMIENTO DE REGISTROS
-        col_factura = 'ID_Factura' if 'ID_Factura' in df_res.columns else ('Factura' if 'Factura' in df_res.columns else None)
+        col_factura = [c for c in df_res.columns if 'FACTURA' in c or 'ID' in c or 'DOC' in c]
+        col_f = col_factura[0] if col_factura else None
         
         if "ordena" in q or "ordenar" in q or "ordenados" in q:
-            if "factura" in q and col_factura:
-                df_res = df_res.sort_values(by=col_factura, ascending=True)
+            if "factura" in q and col_f:
+                df_res = df_res.sort_values(by=col_f, ascending=True)
                 filtros.append("Orden: **Por N° Factura (A-Z)**")
             elif "fecha" in q:
                 df_res = df_res.sort_values(by='Fecha', ascending=True)
@@ -486,10 +391,9 @@ elif modulo == "🤖 NEXUS Copilot":
             st.success(f"🎯 **Criterios Detectados:** {' | '.join(filtros)}")
 
         monto_usd = df_res['Venta_USD'].sum()
-        cant_total = df_res['Cantidad'].sum() if 'Cantidad' in df_res.columns else 0
+        cant_total = df_res['Cantidad'].sum()
         num_trans = len(df_res)
 
-        # Métricas principales en Dólares ($ USD)
         c1, c2, c3 = st.columns(3)
         c1.metric("Venta Total ($ USD)", f"$ {monto_usd:,.2f}")
         c2.metric("Unidades Vendidas", f"{cant_total:,.0f}")
@@ -497,18 +401,12 @@ elif modulo == "🤖 NEXUS Copilot":
 
         st.markdown("### 📋 Detalle de Ventas ($ USD)")
         
-        # Construcción de la tabla
         df_tabla = pd.DataFrame()
         df_tabla['Fecha'] = df_res['Fecha'].dt.strftime('%Y-%m-%d')
-        
-        if col_factura:
-            df_tabla['Factura'] = df_res[col_factura]
-        else:
-            df_tabla['Factura'] = "F-" + df_res.index.astype(str)
-
+        df_tabla['Factura'] = df_res[col_f] if col_f else "F-" + df_res.index.astype(str)
         df_tabla['Cliente'] = df_res['Nombre_Cliente']
         df_tabla['Marca'] = df_res['Marca']
-        df_tabla['Producto'] = df_res['Nombre_Producto'] if 'Nombre_Producto' in df_res.columns else df_res['Categoria']
+        df_tabla['Categoría'] = df_res['Categoria']
         df_tabla['Cantidad'] = df_res['Cantidad'].astype(int)
         df_tabla['Venta USD'] = df_res['Venta_USD'].apply(lambda x: f"$ {x:,.2f}")
 
