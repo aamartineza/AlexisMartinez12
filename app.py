@@ -1,7 +1,8 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import re  # <--- Agrega esta línea
+import re
+import os
 
 from src.etl import generar_datos_prueba
 from src.algo_depletion import calcular_depletion_y_reorden
@@ -18,18 +19,64 @@ st.set_page_config(
 
 TC_GLOBAL = 3.50
 
-# --- CARGA Y PREPARACIÓN DE DATOS ---
-@st.cache_data
-def obtener_datos(file):
+# --- CARGA Y PREPARACIÓN DE DATOS DESDE PARQUET / FALLBACK ---
+@st.cache_data(ttl=3600)
+def obtener_datos(file=None):
     if file is not None:
-        df = pd.read_csv(file) if file.name.endswith('.csv') else pd.read_excel(file)
-        df['Fecha'] = pd.to_datetime(df['Fecha'])
+        # Carga manual por el usuario en el sidebar
+        if file.name.endswith('.parquet'):
+            df = pd.read_parquet(file)
+        elif file.name.endswith('.csv'):
+            df = pd.read_csv(file)
+        else:
+            df = pd.read_excel(file)
+        
+        # Mapeo de columnas dinámico
+        col_fecha = [c for c in df.columns if 'fecha' in c.lower() or 'fec' in c.lower()][0]
+        col_monto = [c for c in df.columns if 'monto' in c.lower() or 'venta' in c.lower() or 'total' in c.lower()][0]
+        
+        df['Fecha'] = pd.to_datetime(df[col_fecha], errors='coerce')
+        df['Monto_Venta'] = pd.to_numeric(df[col_monto], errors='coerce').fillna(0)
         return df, None, None
-    else:
-        return generar_datos_prueba()
 
+    # Intentar leer el histórico Parquet generado localmente
+    PARQUET_HISTORICO = 'ventas_historico_2020_2026.parquet'
+    if os.path.exists(PARQUET_HISTORICO):
+        df = pd.read_parquet(PARQUET_HISTORICO)
+        
+        # Limpieza de nombres de columnas
+        df.columns = df.columns.str.strip()
+        
+        # Detección inteligente de columnas clave
+        cols_fec = [c for c in df.columns if 'fecha' in c.lower() or 'fec' in c.lower()]
+        cols_mon = [c for c in df.columns if 'monto' in c.lower() or 'venta' in c.lower() or 'total' in c.lower() or 'vta' in c.lower()]
+        cols_cli = [c for c in df.columns if 'cliente' in c.lower() or 'razon' in c.lower() or 'nom' in c.lower()]
+        cols_mar = [c for c in df.columns if 'marca' in c.lower()]
+        cols_cat = [c for c in df.columns if 'cat' in c.lower() or 'fam' in c.lower()]
+        cols_can = [c for c in df.columns if 'canal' in c.lower() or 'tipo' in c.lower()]
+
+        # Asignación estandarizada
+        df['Fecha'] = pd.to_datetime(df[cols_fec[0]], errors='coerce') if cols_fec else pd.to_datetime('2026-01-01')
+        df['Monto_Venta'] = pd.to_numeric(df[cols_mon[0]], errors='coerce').fillna(0) if cols_mon else 0.0
+        df['Nombre_Cliente'] = df[cols_cli[0]].astype(str) if cols_cli else 'Desconocido'
+        df['Marca'] = df[cols_mar[0]].astype(str) if cols_mar else 'General'
+        df['Categoria'] = df[cols_cat[0]].astype(str) if cols_cat else 'General'
+        df['Tipo_Cliente'] = df[cols_can[0]].astype(str) if cols_can else 'Offtrade'
+        df['Cantidad'] = pd.to_numeric(df['Cantidad'], errors='coerce').fillna(1) if 'Cantidad' in df.columns else 1
+
+        # Intento de lectura opcional de Stocks
+        df_stock_emp = pd.read_parquet('stockxlotes28.07.parquet') if os.path.exists('stockxlotes28.07.parquet') else None
+        df_stock_cli = None
+        
+        return df, df_stock_emp, df_stock_cli
+
+    # Si no hay Parquet histórico, usa generador de datos de prueba
+    return generar_datos_prueba()
+
+# Carga Inicial de Datos
 df_ventas, df_stock_emp, df_stock_cli = obtener_datos(None)
 
+# Creación de Columnas de Tiempo y Moneda
 df_ventas['Año'] = df_ventas['Fecha'].dt.year
 df_ventas['Mes_Num'] = df_ventas['Fecha'].dt.month
 df_ventas['Día_Num'] = df_ventas['Fecha'].dt.day
@@ -38,7 +85,7 @@ df_ventas['Venta_USD'] = df_ventas['Monto_Venta'] / TC_GLOBAL
 
 # --- CÁLCULO DE MÉTRICAS HEADER ---
 def calcular_metricas_header(df):
-    fecha_max = df['Fecha'].max()
+    fecha_max = df['Fecha'].max() if not df.empty else pd.Timestamp('2026-07-29')
     año_actual = fecha_max.year
     dia_del_año = fecha_max.dayofyear
     
@@ -65,18 +112,13 @@ symbol_var = '▲' if var_pct >= 0 else '▼'
 # --- ENCABEZADO Y GARANTÍA TOTAL DEL BOTÓN DEL SIDEBAR ---
 st.html(f"""
 <style>
-/* Ocultar botones de deploy y menú de tres puntos */
 .stAppDeployButton, #MainMenu, [data-testid="stAppDeployButton"] {{
     display: none !important;
 }}
-
-/* Hacer transparente el header nativo de Streamlit */
 header[data-testid="stHeader"] {{
     background: transparent !important;
     z-index: 1000001 !important;
 }}
-
-/* Forzar que el botón de desplegar/contraer la barra lateral SIEMPRE esté visible y por encima */
 [data-testid="stSidebarCollapseButton"], 
 button[data-testid="baseButton-header"],
 [data-testid="collapsedControl"] {{
@@ -87,19 +129,14 @@ button[data-testid="baseButton-header"],
     display: flex !important;
     visibility: visible !important;
 }}
-
-/* Margen superior para el contenido */
 .main .block-container {{
     padding-top: 105px !important;
     background-color: #FFFFFF;
 }}
-
 html, body, [data-testid="stAppViewContainer"] {{
     background-color: #FFFFFF;
     font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
 }}
-
-/* Header Inmóvil Adaptable */
 .sticky-header {{
     position: fixed;
     top: 0;
@@ -108,28 +145,25 @@ html, body, [data-testid="stAppViewContainer"] {{
     height: 85px;
     background-color: #FFFFFF;
     z-index: 99999;
-    padding: 8px 30px 8px 80px; /* Margen amplio a la izquierda para el botón flotante */
+    padding: 8px 30px 8px 80px;
     border-bottom: 1.5px solid #C59D7F;
     display: flex;
     justify-content: space-between;
     align-items: center;
     box-shadow: 0 2px 10px rgba(0,0,0,0.04);
 }}
-
 .brand-group {{
     display: flex;
     flex-direction: column;
     align-items: center;
     text-align: center;
 }}
-
 .star-logo {{
     color: #C59D7F;
     font-size: 24px;
     line-height: 1;
     margin-bottom: 0px;
 }}
-
 .brand-title {{
     font-size: 22px;
     font-weight: 300;
@@ -139,7 +173,6 @@ html, body, [data-testid="stAppViewContainer"] {{
     letter-spacing: 0.5px;
     white-space: nowrap;
 }}
-
 .subtitle-offtrade {{
     font-size: 12px;
     color: #C59D7F;
@@ -148,7 +181,6 @@ html, body, [data-testid="stAppViewContainer"] {{
     letter-spacing: 0.5px;
     white-space: nowrap;
 }}
-
 .main-title-header {{
     font-size: 19px;
     color: #4A5568;
@@ -159,19 +191,16 @@ html, body, [data-testid="stAppViewContainer"] {{
     line-height: 1.2;
     white-space: nowrap;
 }}
-
 .metrics-group {{
     display: flex;
     align-items: center;
     gap: 25px;
 }}
-
 .metric-card-header {{
     display: flex;
     flex-direction: column;
     text-align: right;
 }}
-
 .label-header {{
     font-size: 10px;
     color: #A0AEC0;
@@ -180,7 +209,6 @@ html, body, [data-testid="stAppViewContainer"] {{
     letter-spacing: 0.8px;
     white-space: nowrap;
 }}
-
 .val-header {{
     font-size: 18px;
     font-weight: 700;
@@ -188,18 +216,15 @@ html, body, [data-testid="stAppViewContainer"] {{
     line-height: 1.1;
     white-space: nowrap;
 }}
-
 .badge-header {{
     font-size: 11px;
     font-weight: 700;
     white-space: nowrap;
 }}
-
 .divider-header {{
     border-left: 1px solid #E2E8F0;
     height: 40px;
 }}
-
 .tag-header {{
     font-size: 11px;
     color: #C59D7F;
@@ -252,7 +277,7 @@ html, body, [data-testid="stAppViewContainer"] {{
 st.sidebar.markdown("<br>", unsafe_allow_html=True)
 st.sidebar.title("Filtros Globales")
 
-archivo_subido = st.sidebar.file_uploader("Actualizar base de ventas:", type=["xlsx", "csv"])
+archivo_subido = st.sidebar.file_uploader("Actualizar base de ventas:", type=["parquet", "xlsx", "csv"])
 if archivo_subido is not None:
     df_ventas, _, _ = obtener_datos(archivo_subido)
     df_ventas['Año'] = df_ventas['Fecha'].dt.year
@@ -260,7 +285,7 @@ if archivo_subido is not None:
     df_ventas['Mes_Nombre'] = df_ventas['Fecha'].dt.strftime('%b').str.lower()
     df_ventas['Venta_USD'] = df_ventas['Monto_Venta'] / TC_GLOBAL
 
-años_disp = sorted(df_ventas['Año'].unique())
+años_disp = sorted(df_ventas['Año'].dropna().unique())
 años_sel = st.sidebar.multiselect("Filtrar por Año:", años_disp, default=años_disp)
 
 canales_disp = sorted(df_ventas['Tipo_Cliente'].dropna().unique())
@@ -384,8 +409,8 @@ elif modulo == "🤖 NEXUS Copilot":
                 filtros.append(f"Marca: **{mar}**")
                 break
 
-        # 3. FILTRO DE AÑO (2025, 2026)
-        años_enc = re.findall(r'\b(2025|2026)\b', q)
+        # 3. FILTRO DE AÑO
+        años_enc = re.findall(r'\b(202[0-6])\b', q)
         if años_enc:
             ano_sel = int(años_enc[0])
             df_res = df_res[df_res['Año'] == ano_sel]
