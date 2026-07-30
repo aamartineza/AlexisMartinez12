@@ -19,11 +19,11 @@ st.set_page_config(
 
 TC_GLOBAL = 3.50
 
-# --- CARGA Y PREPARACIÓN DE DATOS DESDE PARQUET / FALLBACK ---
+# --- CARGA Y PREPARACIÓN DE DATOS (PARQUET CON CACHÉ) ---
 @st.cache_data(ttl=3600)
 def obtener_datos(file=None):
     if file is not None:
-        # Carga manual por el usuario en el sidebar
+        # Carga manual por el usuario desde el sidebar
         if file.name.endswith('.parquet'):
             df = pd.read_parquet(file)
         elif file.name.endswith('.csv'):
@@ -31,23 +31,24 @@ def obtener_datos(file=None):
         else:
             df = pd.read_excel(file)
         
-        # Mapeo de columnas dinámico
-        col_fecha = [c for c in df.columns if 'fecha' in c.lower() or 'fec' in c.lower()][0]
-        col_monto = [c for c in df.columns if 'monto' in c.lower() or 'venta' in c.lower() or 'total' in c.lower()][0]
+        # Mapeo dinámico de columnas mínimas
+        cols_fec = [c for c in df.columns if 'fecha' in c.lower() or 'fec' in c.lower()]
+        cols_mon = [c for c in df.columns if 'monto' in c.lower() or 'venta' in c.lower() or 'total' in c.lower()]
+        
+        col_fecha = cols_fec[0] if cols_fec else df.columns[0]
+        col_monto = cols_mon[0] if cols_mon else df.columns[1]
         
         df['Fecha'] = pd.to_datetime(df[col_fecha], errors='coerce')
         df['Monto_Venta'] = pd.to_numeric(df[col_monto], errors='coerce').fillna(0)
         return df, None, None
 
-    # Intentar leer el histórico Parquet generado localmente
+    # Intentar leer el archivo histórico Parquet en la carpeta del proyecto
     PARQUET_HISTORICO = 'ventas_historico_2020_2026.parquet'
     if os.path.exists(PARQUET_HISTORICO):
         df = pd.read_parquet(PARQUET_HISTORICO)
-        
-        # Limpieza de nombres de columnas
         df.columns = df.columns.str.strip()
         
-        # Detección inteligente de columnas clave
+        # Detección inteligente de nombres de columnas
         cols_fec = [c for c in df.columns if 'fecha' in c.lower() or 'fec' in c.lower()]
         cols_mon = [c for c in df.columns if 'monto' in c.lower() or 'venta' in c.lower() or 'total' in c.lower() or 'vta' in c.lower()]
         cols_cli = [c for c in df.columns if 'cliente' in c.lower() or 'razon' in c.lower() or 'nom' in c.lower()]
@@ -55,7 +56,7 @@ def obtener_datos(file=None):
         cols_cat = [c for c in df.columns if 'cat' in c.lower() or 'fam' in c.lower()]
         cols_can = [c for c in df.columns if 'canal' in c.lower() or 'tipo' in c.lower()]
 
-        # Asignación estandarizada
+        # Estandarización de columnas
         df['Fecha'] = pd.to_datetime(df[cols_fec[0]], errors='coerce') if cols_fec else pd.to_datetime('2026-01-01')
         df['Monto_Venta'] = pd.to_numeric(df[cols_mon[0]], errors='coerce').fillna(0) if cols_mon else 0.0
         df['Nombre_Cliente'] = df[cols_cli[0]].astype(str) if cols_cli else 'Desconocido'
@@ -64,16 +65,16 @@ def obtener_datos(file=None):
         df['Tipo_Cliente'] = df[cols_can[0]].astype(str) if cols_can else 'Offtrade'
         df['Cantidad'] = pd.to_numeric(df['Cantidad'], errors='coerce').fillna(1) if 'Cantidad' in df.columns else 1
 
-        # Intento de lectura opcional de Stocks
+        # Carga opcional de archivos de stock Parquet
         df_stock_emp = pd.read_parquet('stockxlotes28.07.parquet') if os.path.exists('stockxlotes28.07.parquet') else None
         df_stock_cli = None
         
         return df, df_stock_emp, df_stock_cli
 
-    # Si no hay Parquet histórico, usa generador de datos de prueba
+    # Fallback a generador de pruebas en caso no exista el Parquet
     return generar_datos_prueba()
 
-# Carga Inicial de Datos
+# Carga de la Data
 df_ventas, df_stock_emp, df_stock_cli = obtener_datos(None)
 
 # Creación de Columnas de Tiempo y Moneda
@@ -83,25 +84,37 @@ df_ventas['Día_Num'] = df_ventas['Fecha'].dt.day
 df_ventas['Mes_Nombre'] = df_ventas['Fecha'].dt.strftime('%b').str.lower()
 df_ventas['Venta_USD'] = df_ventas['Monto_Venta'] / TC_GLOBAL
 
-# --- CÁLCULO DE MÉTRICAS HEADER ---
+# --- CÁLCULO DE MÉTRICAS HEADER (BLINDADO CONTRA ERRORES/NULOS) ---
 def calcular_metricas_header(df):
-    fecha_max = df['Fecha'].max() if not df.empty else pd.Timestamp('2026-07-29')
-    año_actual = fecha_max.year
-    dia_del_año = fecha_max.dayofyear
+    fechas_validas = df['Fecha'].dropna()
+    if df.empty or fechas_validas.empty:
+        fecha_max = pd.Timestamp.now()
+        ytd_actual_usd, var_ytd_pct, venta_hoy_usd = 0.0, 0.0, 0.0
+    else:
+        fecha_max = fechas_validas.max()
+        if pd.isna(fecha_max):
+            fecha_max = pd.Timestamp.now()
+
+        año_actual = fecha_max.year
+        dia_del_año = fecha_max.dayofyear
+        
+        df_hoy = df[df['Fecha'].dt.date == fecha_max.date()]
+        venta_hoy_usd = df_hoy['Venta_USD'].sum() if 'Venta_USD' in df_hoy.columns else 0.0
+        
+        df_ytd_act = df[(df['Año'] == año_actual) & (df['Fecha'].dt.dayofyear <= dia_del_año)]
+        ytd_actual_usd = df_ytd_act['Venta_USD'].sum() if 'Venta_USD' in df_ytd_act.columns else 0.0
+        
+        df_ytd_ant = df[(df['Año'] == año_actual - 1) & (df['Fecha'].dt.dayofyear <= dia_del_año)]
+        ytd_anterior_usd = df_ytd_ant['Venta_USD'].sum() if 'Venta_USD' in df_ytd_ant.columns else 0.0
+        
+        var_ytd_pct = ((ytd_actual_usd - ytd_anterior_usd) / ytd_anterior_usd) * 100 if ytd_anterior_usd > 0 else 0.0
     
-    df_hoy = df[df['Fecha'].dt.date == fecha_max.date()]
-    venta_hoy_usd = df_hoy['Venta_USD'].sum()
-    
-    df_ytd_act = df[(df['Año'] == año_actual) & (df['Fecha'].dt.dayofyear <= dia_del_año)]
-    ytd_actual_usd = df_ytd_act['Venta_USD'].sum()
-    
-    df_ytd_ant = df[(df['Año'] == año_actual - 1) & (df['Fecha'].dt.dayofyear <= dia_del_año)]
-    ytd_anterior_usd = df_ytd_ant['Venta_USD'].sum()
-    
-    var_ytd_pct = ((ytd_actual_usd - ytd_anterior_usd) / ytd_anterior_usd) * 100 if ytd_anterior_usd > 0 else 0.0
-    
-    str_fecha = fecha_max.strftime('%d/%m/%Y')
-    str_hora = fecha_max.strftime('%H:%M:%S') if fecha_max.time() != pd.Timestamp('00:00:00').time() else "23:59:59"
+    try:
+        str_fecha = fecha_max.strftime('%d/%m/%Y')
+        str_hora = fecha_max.strftime('%H:%M:%S') if fecha_max.time() != pd.Timestamp('00:00:00').time() else "23:59:59"
+    except Exception:
+        str_fecha = "29/07/2026"
+        str_hora = "23:59:59"
     
     return ytd_actual_usd, var_ytd_pct, venta_hoy_usd, str_fecha, str_hora
 
@@ -109,7 +122,7 @@ ytd_usd, var_pct, hoy_usd, fecha_cierre, hora_cierre = calcular_metricas_header(
 color_var = '#38A169' if var_pct >= 0 else '#E53E3E'
 symbol_var = '▲' if var_pct >= 0 else '▼'
 
-# --- ENCABEZADO Y GARANTÍA TOTAL DEL BOTÓN DEL SIDEBAR ---
+# --- ENCABEZADO Y ESTILOS CSS ---
 st.html(f"""
 <style>
 .stAppDeployButton, #MainMenu, [data-testid="stAppDeployButton"] {{
@@ -409,7 +422,7 @@ elif modulo == "🤖 NEXUS Copilot":
                 filtros.append(f"Marca: **{mar}**")
                 break
 
-        # 3. FILTRO DE AÑO
+        # 3. FILTRO DE AÑO (Soporta 2020 a 2026)
         años_enc = re.findall(r'\b(202[0-6])\b', q)
         if años_enc:
             ano_sel = int(años_enc[0])
