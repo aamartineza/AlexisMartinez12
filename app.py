@@ -19,7 +19,7 @@ st.set_page_config(
 
 TC_GLOBAL = 3.50
 
-# --- CARGA Y PREPARACIÓN ROBUSTA DE DATOS (PARQUET CON CACHÉ) ---
+# --- CARGA Y LIMPIEZA ROBUSTA DE DATOS (PARQUET CON CACHÉ) ---
 @st.cache_data(ttl=3600)
 def obtener_datos(file=None):
     df = None
@@ -53,7 +53,6 @@ def obtener_datos(file=None):
     cols_mon = [c for c in df.columns if any(x in c for x in ['USD', 'MONTO', 'VENTA', 'TOTAL', 'IMPORTE', 'NETO', 'VTA', 'SOLES', 'S/'])]
     col_monto = cols_mon[0] if cols_mon else df.columns[1]
 
-    # Limpiar caracteres extraños en monto
     val_monto = df[col_monto].astype(str).str.replace(r'[^\d.-]', '', regex=True)
     df['Monto_Venta'] = pd.to_numeric(val_monto, errors='coerce').fillna(0)
 
@@ -62,27 +61,29 @@ def obtener_datos(file=None):
     else:
         df['Venta_USD'] = df['Monto_Venta'] / TC_GLOBAL
 
-    # 3. DETECCIÓN DE TEXTOS (Cliente, Marca, Categoria, Canal)
+    # 3. TEXTOS Y LIMPIEZA DE NANs (Categorías, Marcas, Canales)
     cols_cli = [c for c in df.columns if any(x in c for x in ['CLIENTE', 'RAZON', 'NOM', 'RUC'])]
     cols_mar = [c for c in df.columns if 'MARCA' in c]
     cols_cat = [c for c in df.columns if any(x in c for x in ['CAT', 'FAM', 'LINEA', 'GRUPO'])]
     cols_can = [c for c in df.columns if any(x in c for x in ['CANAL', 'TIPO', 'SUB'])]
 
-    df['Nombre_Cliente'] = df[cols_cli[0]].astype(str) if cols_cli else 'Cliente General'
-    df['Marca'] = df[cols_mar[0]].astype(str) if cols_mar else 'Marca General'
-    df['Categoria'] = df[cols_cat[0]].astype(str) if cols_cat else 'General'
-    df['Tipo_Cliente'] = df[cols_can[0]].astype(str) if cols_can else 'Offtrade'
+    df['Nombre_Cliente'] = df[cols_cli[0]].fillna('Sin Cliente').astype(str) if cols_cli else 'Cliente General'
+    df['Marca'] = df[cols_mar[0]].fillna('Otras Marcas').astype(str) if cols_mar else 'Marca General'
+    df['Categoria'] = df[cols_cat[0]].fillna('General').astype(str) if cols_cat else 'General'
+    df['Tipo_Cliente'] = df[cols_can[0]].fillna('Otros').astype(str) if cols_can else 'Offtrade'
+
+    # Reemplazar palabras 'nan' literales generadas por la conversión
+    for col in ['Nombre_Cliente', 'Marca', 'Categoria', 'Tipo_Cliente']:
+        df[col] = df[col].replace(['nan', 'NaN', 'None', 'NONE', 'null', ''], 'Otros')
 
     cols_cant = [c for c in df.columns if any(x in c for x in ['CANT', 'UNI', 'QTY'])]
     df['Cantidad'] = pd.to_numeric(df[cols_cant[0]], errors='coerce').fillna(1) if cols_cant else 1
 
-    # Tratar fechas nulas de forma segura
-    if df['Fecha'].isna().all():
-        df['Fecha'] = pd.date_range(start='2020-01-01', periods=len(df), freq='D')
-    else:
-        df['Fecha'] = df['Fecha'].fillna(method='ffill').fillna(pd.Timestamp('2026-01-01'))
+    # FILTRADO DE SEGURIDAD PARA FECHAS VALIDADAS (Evita 2090, 2392, etc.)
+    df = df.dropna(subset=['Fecha'])
+    df = df[(df['Fecha'].dt.year >= 2020) & (df['Fecha'].dt.year <= 2026)]
 
-    # Detección de Stocks Parquet
+    # Carga de archivos Parquet de Stock
     df_stock_emp = pd.read_parquet('stockxlotes28.07.parquet') if os.path.exists('stockxlotes28.07.parquet') else None
 
     return df, df_stock_emp, None
@@ -90,9 +91,9 @@ def obtener_datos(file=None):
 # --- CARGAR DATOS Y CREAR TIEMPOS ---
 df_ventas, df_stock_emp, df_stock_cli = obtener_datos(None)
 
-df_ventas['Año'] = df_ventas['Fecha'].dt.year.fillna(2026).astype(int)
-df_ventas['Mes_Num'] = df_ventas['Fecha'].dt.month.fillna(1).astype(int)
-df_ventas['Día_Num'] = df_ventas['Fecha'].dt.day.fillna(1).astype(int)
+df_ventas['Año'] = df_ventas['Fecha'].dt.year.astype(int)
+df_ventas['Mes_Num'] = df_ventas['Fecha'].dt.month.astype(int)
+df_ventas['Día_Num'] = df_ventas['Fecha'].dt.day.astype(int)
 df_ventas['Mes_Nombre'] = df_ventas['Fecha'].dt.strftime('%b').str.lower()
 
 # --- CÁLCULO DE MÉTRICAS HEADER ---
@@ -190,9 +191,9 @@ st.sidebar.title("Filtros Globales")
 archivo_subido = st.sidebar.file_uploader("Actualizar base de ventas:", type=["parquet", "xlsx", "csv"])
 if archivo_subido is not None:
     df_ventas, _, _ = obtener_datos(archivo_subido)
-    df_ventas['Año'] = df_ventas['Fecha'].dt.year.fillna(2026).astype(int)
-    df_ventas['Mes_Num'] = df_ventas['Fecha'].dt.month.fillna(1).astype(int)
-    df_ventas['Día_Num'] = df_ventas['Fecha'].dt.day.fillna(1).astype(int)
+    df_ventas['Año'] = df_ventas['Fecha'].dt.year.astype(int)
+    df_ventas['Mes_Num'] = df_ventas['Fecha'].dt.month.astype(int)
+    df_ventas['Día_Num'] = df_ventas['Fecha'].dt.day.astype(int)
     df_ventas['Mes_Nombre'] = df_ventas['Fecha'].dt.strftime('%b').str.lower()
 
 años_disp = sorted(df_ventas['Año'].dropna().unique())
